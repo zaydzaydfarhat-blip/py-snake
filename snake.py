@@ -7,6 +7,7 @@ Controls: arrow keys or h/j/k/l or WASD. p pauses, q quits.
 
 import argparse
 import curses
+import os
 import random
 import sys
 from collections import deque
@@ -96,6 +97,31 @@ class Game:
         else:
             self.body.pop()
 
+    def resize(self, height, width):
+        """Fit the run into a new board size without ending it."""
+        height, width = max(3, height), max(6, width)
+        self.height, self.width = height, width
+
+        kept, seen = deque(), set()
+        for y, x in self.body:
+            cell = (min(max(y, 0), height - 1), min(max(x, 0), width - 1))
+            if cell not in seen:
+                seen.add(cell)
+                kept.append(cell)
+        self.body = kept or deque([(height // 2, width // 2)])
+
+        food_ok = (
+            self.food is not None
+            and 0 <= self.food[0] < height
+            and 0 <= self.food[1] < width
+            and self.food not in set(self.body)
+        )
+        if not food_ok:
+            if self.game_over:
+                self.food = None
+            else:
+                self._place_food()
+
     @property
     def tick_ms(self):
         return max(60, 150 - self.score * 5)
@@ -126,6 +152,13 @@ def init_colors():
 
 def draw(stdscr, game, paused, high_score, attrs=None):
     attrs = attrs or {}
+    try:
+        _draw(stdscr, game, paused, high_score, attrs)
+    except curses.error:
+        pass
+
+
+def _draw(stdscr, game, paused, high_score, attrs):
     stdscr.erase()
     stdscr.addstr(0, 0, f" score {game.score}   best {high_score} ", attrs.get("hud", 0))
     if paused:
@@ -138,7 +171,7 @@ def draw(stdscr, game, paused, high_score, attrs=None):
     stdscr.addstr(top - 1, 0, WALL_CH * (game.width + 2), attrs.get("wall", 0))
     stdscr.addstr(top + game.height, 0, WALL_CH * (game.width + 2), attrs.get("wall", 0))
 
-    if game.food:
+    if game.food and 0 <= game.food[0] < game.height and 0 <= game.food[1] < game.width:
         fy, fx = game.food
         stdscr.addstr(top + fy, 1 + fx, FOOD_CH, attrs.get("food", 0))
     for index, (by, bx) in enumerate(game.body):
@@ -156,41 +189,113 @@ def draw(stdscr, game, paused, high_score, attrs=None):
     stdscr.refresh()
 
 
+def board_size(rows, cols):
+    """Playable area for a terminal that is rows x cols."""
+    return max(3, rows - 6), max(20, cols - 2)
+
+
+def too_small(rows, cols):
+    return rows < 12 or cols < 30
+
+
+def safe_addstr(stdscr, y, x, text, attr=0):
+    """addstr that tolerates the last cell of the screen."""
+    rows, cols = stdscr.getmaxyx()
+    if not (0 <= y < rows) or x >= cols:
+        return
+    try:
+        stdscr.addstr(y, x, text[: max(0, cols - x - 1)], attr)
+    except curses.error:
+        pass
+
+
+def terminal_size():
+    """Real terminal size, independent of whatever ncurses last noticed."""
+    try:
+        size = os.get_terminal_size(sys.__stdout__.fileno())
+        return size.lines, size.columns
+    except (OSError, ValueError, AttributeError):
+        return curses.LINES, curses.COLS
+
+
+def fit_to_terminal(game):
+    """Re-sync ncurses and the board with the real window size."""
+    rows, cols = terminal_size()
+    if (rows, cols) != (curses.LINES, curses.COLS):
+        try:
+            curses.resizeterm(rows, cols)
+        except curses.error:
+            pass
+    if not too_small(rows, cols):
+        target = board_size(rows, cols)
+        if (game.height, game.width) != target:
+            game.resize(*target)
+    return rows, cols
+
+
+def wait_for_room(stdscr):
+    """Wait until the terminal is big enough. Returns False if the user quits."""
+    while True:
+        rows, cols = terminal_size()
+        if not too_small(rows, cols):
+            return True
+        stdscr.erase()
+        safe_addstr(stdscr, 0, 0, "terminal too small")
+        safe_addstr(stdscr, 1, 0, f"need 30x12, have {cols}x{rows}")
+        safe_addstr(stdscr, 2, 0, "resize the window, or q to quit")
+        stdscr.refresh()
+        stdscr.timeout(250)
+        if stdscr.getch() in (ord("q"), ord("Q")):
+            return False
+
+
+def draw_ending(stdscr, game, win, high_score, attrs):
+    draw(stdscr, game, False, high_score, attrs)
+    msg = f" you win! score {game.score} " if win else f" game over - score {game.score} "
+    hint = " r restart   q quit "
+    y = 2 + game.height // 2
+    safe_addstr(stdscr, y, max(0, (game.width - len(msg)) // 2 + 1), msg, attrs.get("hud", 0))
+    safe_addstr(stdscr, y + 1, max(0, (game.width - len(hint)) // 2 + 1), hint, attrs.get("hint", 0))
+    stdscr.refresh()
+
+
 def play(stdscr):
     curses.curs_set(0)
     curses.noecho()
     curses.cbreak()
     stdscr.keypad(True)
     stdscr.nodelay(True)
-
-    rows, cols = stdscr.getmaxyx()
-    if rows < 12 or cols < 30:
-        stdscr.erase()
-        stdscr.addstr(0, 0, "terminal too small: need at least 30x12")
-        stdscr.refresh()
-        stdscr.timeout(-1)
-        stdscr.getch()
-        return
-
     attrs = init_colors()
-    board_h = rows - 6
-    board_w = max(20, cols - 2)
     high_score = 0
 
     while True:
-        game = Game(board_h, board_w)
+        if not wait_for_room(stdscr):
+            return
+        game = Game(*board_size(*terminal_size()))
         paused = False
         stdscr.timeout(game.tick_ms)
 
         while not game.game_over:
+            rows, cols = fit_to_terminal(game)
+            small = too_small(rows, cols)
+            stdscr.timeout(200 if small else (-1 if paused else game.tick_ms))
+
             key = stdscr.getch()
             if key in (ord("q"), ord("Q")):
                 return
-            if key in (ord("p"), ord("P")):
-                paused = not paused
-                stdscr.timeout(-1 if paused else game.tick_ms)
-            elif key in KEYS:
-                game.turn(KEYS[key])
+            if not small:
+                if key in (ord("p"), ord("P")):
+                    paused = not paused
+                elif key in KEYS:
+                    game.turn(KEYS[key])
+
+            if small:
+                stdscr.erase()
+                safe_addstr(stdscr, 0, 0, "terminal too small")
+                safe_addstr(stdscr, 1, 0, f"need 30x12, have {cols}x{rows}")
+                safe_addstr(stdscr, 2, 0, "resize the window, or q to quit")
+                stdscr.refresh()
+                continue
 
             if not paused:
                 game.step()
@@ -199,12 +304,10 @@ def play(stdscr):
 
         high_score = max(high_score, game.score)
         win = game.food is None
-        draw(stdscr, game, False, high_score, attrs)
-        msg = f" you win! score {game.score} " if win else f" game over - score {game.score} "
-        stdscr.addstr(board_h // 2 + 2, max(0, (board_w - len(msg)) // 2 + 1), msg)
-        stdscr.addstr(board_h // 2 + 3, max(0, (board_w - 24) // 2 + 1), " r restart   q quit ")
         stdscr.timeout(-1)
         while True:
+            fit_to_terminal(game)
+            draw_ending(stdscr, game, win, high_score, attrs)
             key = stdscr.getch()
             if key in (ord("q"), ord("Q")):
                 return
@@ -248,6 +351,27 @@ def selftest():
         g.step()
         assert len(set(g.body)) == len(g.body), "snake overlaps itself"
         assert all(0 <= y < g.height and 0 <= x < g.width for y, x in g.body)
+
+    # terminal sizing helpers
+    assert board_size(24, 80) == (18, 78)
+    assert board_size(13, 31) == (7, 29)
+    assert too_small(11, 80) and too_small(24, 29) and not too_small(12, 30)
+
+    # shrinking mid-run keeps the snake inside and on-screen
+    g = Game(20, 40, random.Random(4))
+    for _ in range(10):
+        g.step()
+    assert not g.game_over
+    g.resize(6, 10)
+    assert all(0 <= y < 6 and 0 <= x < 10 for y, x in g.body), "resize left cells outside"
+    assert g.body and len(set(g.body)) == len(g.body), "resize overlapped the snake"
+    assert g.food is None or (0 <= g.food[0] < 6 and 0 <= g.food[1] < 10)
+    assert g.food is None or g.food not in set(g.body)
+    # and growing again still works
+    g.resize(30, 90)
+    assert (g.height, g.width) == (30, 90)
+    if not g.game_over:
+        g.step()
 
     print("selftest: all checks passed")
     return 0
