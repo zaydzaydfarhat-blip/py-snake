@@ -150,6 +150,35 @@ def init_colors():
     }
 
 
+def layout(rows, cols):
+    """Chrome that fits the window: the HUD and hint drop out when rows are scarce.
+
+    A phone keyboard can leave a terminal only ~9 rows tall, so nothing here is
+    allowed to be mandatory except the border.
+    """
+    hud = rows >= 7
+    hint = rows >= 10
+    top = (1 if hud else 0) + 1          # HUD row + top border
+    bottom = 1 + (1 if hint else 0)      # bottom border + hint row
+    return {
+        "hud": hud,
+        "hint": hint,
+        "top": top,
+        "height": max(3, rows - top - bottom),
+        "width": max(6, cols - 2),
+    }
+
+
+def board_size(rows, cols):
+    """Playable area for a terminal that is rows x cols."""
+    lay = layout(rows, cols)
+    return lay["height"], lay["width"]
+
+
+def too_small(rows, cols):
+    return rows < 6 or cols < 20
+
+
 def draw(stdscr, game, paused, high_score, attrs=None):
     attrs = attrs or {}
     try:
@@ -159,52 +188,52 @@ def draw(stdscr, game, paused, high_score, attrs=None):
 
 
 def _draw(stdscr, game, paused, high_score, attrs):
+    rows, cols = stdscr.getmaxyx()
+    lay = layout(rows, cols)
     stdscr.erase()
-    stdscr.addstr(0, 0, f" score {game.score}   best {high_score} ", attrs.get("hud", 0))
-    if paused:
-        stdscr.addstr(0, 26, "[paused]", attrs.get("food", 0))
 
-    top = 2
+    top = lay["top"]
+    wall = attrs.get("wall", 0)
+
+    if lay["hud"]:
+        safe_addstr(stdscr, 0, 0, f" score {game.score}  best {high_score} ", attrs.get("hud", 0))
+        if paused:
+            safe_addstr(stdscr, 0, max(0, cols - 10), "[paused]", attrs.get("food", 0))
+
     for y in range(game.height):
-        stdscr.addstr(top + y, 0, WALL_CH, attrs.get("wall", 0))
-        stdscr.addstr(top + y, game.width + 1, WALL_CH, attrs.get("wall", 0))
-    stdscr.addstr(top - 1, 0, WALL_CH * (game.width + 2), attrs.get("wall", 0))
-    stdscr.addstr(top + game.height, 0, WALL_CH * (game.width + 2), attrs.get("wall", 0))
+        safe_addstr(stdscr, top + y, 0, WALL_CH, wall)
+        safe_addstr(stdscr, top + y, game.width + 1, WALL_CH, wall)
+    safe_addstr(stdscr, top - 1, 0, WALL_CH * (game.width + 2), wall)
+    safe_addstr(stdscr, top + game.height, 0, WALL_CH * (game.width + 2), wall)
 
     if game.food and 0 <= game.food[0] < game.height and 0 <= game.food[1] < game.width:
         fy, fx = game.food
-        stdscr.addstr(top + fy, 1 + fx, FOOD_CH, attrs.get("food", 0))
+        safe_addstr(stdscr, top + fy, 1 + fx, FOOD_CH, attrs.get("food", 0))
     for index, (by, bx) in enumerate(game.body):
         if index == 0:
-            stdscr.addstr(top + by, 1 + bx, "@", attrs.get("head", 0))
+            safe_addstr(stdscr, top + by, 1 + bx, "@", attrs.get("head", 0))
         else:
-            stdscr.addstr(top + by, 1 + bx, SNAKE_CH, attrs.get("snake", 0))
+            safe_addstr(stdscr, top + by, 1 + bx, SNAKE_CH, attrs.get("snake", 0))
 
-    stdscr.addstr(
-        top + game.height + 2,
-        0,
-        "arrows/hjkl/wasd  p pause  q quit",
-        attrs.get("hint", 0),
-    )
+    if lay["hint"]:
+        hint = "hjkl/wasd p pause q quit" if cols < 46 else "arrows/hjkl/wasd  p pause  q quit"
+        safe_addstr(stdscr, top + game.height + 1, 0, hint, attrs.get("hint", 0))
+
     stdscr.refresh()
 
 
-def board_size(rows, cols):
-    """Playable area for a terminal that is rows x cols."""
-    return max(3, rows - 6), max(20, cols - 2)
-
-
-def too_small(rows, cols):
-    return rows < 12 or cols < 30
-
-
 def safe_addstr(stdscr, y, x, text, attr=0):
-    """addstr that tolerates the last cell of the screen."""
+    """addstr that tolerates the last cell of the screen.
+
+    Only the very bottom-right cell is avoided (writing it scrolls); everything
+    else, including a right-hand border in the last column, is fair game.
+    """
     rows, cols = stdscr.getmaxyx()
-    if not (0 <= y < rows) or x >= cols:
+    if not (0 <= y < rows) or x < 0 or x >= cols:
         return
+    limit = cols - x if y < rows - 1 else cols - x - 1
     try:
-        stdscr.addstr(y, x, text[: max(0, cols - x - 1)], attr)
+        stdscr.addstr(y, x, text[: max(0, limit)], attr)
     except curses.error:
         pass
 
@@ -353,9 +382,12 @@ def selftest():
         assert all(0 <= y < g.height and 0 <= x < g.width for y, x in g.body)
 
     # terminal sizing helpers
-    assert board_size(24, 80) == (18, 78)
-    assert board_size(13, 31) == (7, 29)
-    assert too_small(11, 80) and too_small(24, 29) and not too_small(12, 30)
+    assert board_size(24, 80) == (20, 78)
+    assert board_size(13, 31) == (9, 29)
+    assert board_size(9, 20) == (6, 18)          # keyboard-sized window
+    assert layout(6, 20)["hud"] is False and layout(7, 20)["hud"] is True
+    assert layout(9, 20)["hint"] is False and layout(10, 20)["hint"] is True
+    assert too_small(5, 80) and too_small(24, 19) and not too_small(6, 20)
 
     # shrinking mid-run keeps the snake inside and on-screen
     g = Game(20, 40, random.Random(4))
