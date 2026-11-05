@@ -38,9 +38,15 @@ Other controls
 
 Key| Action
 P| Pause / Resume
-Q| Quit
-R| Restart after game over
-Space| Restart after game over
+Q| Quit the game
+R| Restart after losing
+
+🏁 When You Lose
+
+The game ends when you hit a wall or your own body.
+
+- Press Q to exit the game.
+- Press R to restart and play again.
 
 📋 Requirements
 
