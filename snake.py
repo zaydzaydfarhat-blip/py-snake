@@ -10,6 +10,7 @@ import curses
 import os
 import random
 import sys
+import time
 from collections import deque
 
 UP, DOWN, LEFT, RIGHT = "UP", "DOWN", "LEFT", "RIGHT"
@@ -179,6 +180,40 @@ def too_small(rows, cols):
     return rows < 6 or cols < 20
 
 
+def read_click():
+    """Latest real button event as (x, y), or None.
+
+    Motion/position reports are ignored on purpose: ncurses emits KEY_MOUSE for
+    those too, but with the coordinates of the previous event, which would make
+    taps act on stale positions.
+    """
+    try:
+        _mid, mx, my, _mz, bstate = curses.getmouse()
+    except curses.error:
+        return None
+    pressed = (
+        curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED | curses.BUTTON1_RELEASED
+    )
+    if not bstate & pressed:
+        return None
+    return mx, my
+
+
+def touch_direction(game, x, y, top):
+    """Which way to turn for a tap at screen (x, y): dominant axis wins.
+
+    Works anywhere on screen, so the border ring doubles as a d-pad.
+    """
+    head_y, head_x = game.body[0]
+    dx = (x - 1) - head_x
+    dy = (y - top) - head_y
+    if dx == 0 and dy == 0:
+        return None
+    if abs(dx) >= abs(dy):
+        return RIGHT if dx > 0 else LEFT
+    return DOWN if dy > 0 else UP
+
+
 def draw(stdscr, game, paused, high_score, attrs=None):
     attrs = attrs or {}
     try:
@@ -270,7 +305,7 @@ def wait_for_room(stdscr):
             return True
         stdscr.erase()
         safe_addstr(stdscr, 0, 0, "terminal too small")
-        safe_addstr(stdscr, 1, 0, f"need 30x12, have {cols}x{rows}")
+        safe_addstr(stdscr, 1, 0, f"need 20x6, have {cols}x{rows}")
         safe_addstr(stdscr, 2, 0, "resize the window, or q to quit")
         stdscr.refresh()
         stdscr.timeout(250)
@@ -294,6 +329,11 @@ def play(stdscr):
     curses.cbreak()
     stdscr.keypad(True)
     stdscr.nodelay(True)
+    try:
+        curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        curses.mouseinterval(0)
+    except curses.error:
+        pass  # no mouse/touch here; keys still work
     attrs = init_colors()
     high_score = 0
 
@@ -304,32 +344,61 @@ def play(stdscr):
         paused = False
         stdscr.timeout(game.tick_ms)
 
+        next_tick = time.monotonic() + game.tick_ms / 1000.0
+        draw(stdscr, game, paused, high_score, attrs)
+
         while not game.game_over:
             rows, cols = fit_to_terminal(game)
             small = too_small(rows, cols)
-            stdscr.timeout(200 if small else (-1 if paused else game.tick_ms))
+            # poll often so taps and resizes feel instant; the clock decides steps
+            stdscr.timeout(200 if small else 20)
 
             key = stdscr.getch()
             if key in (ord("q"), ord("Q")):
                 return
-            if not small:
-                if key in (ord("p"), ord("P")):
+
+            changed = False
+            if not small and key != -1:
+                if key == curses.KEY_MOUSE:
+                    point = read_click()
+                    if point:
+                        mx, my = point
+                        lay = layout(rows, cols)
+                        if lay["hud"] and my == 0:
+                            paused = not paused
+                            changed = True
+                        else:
+                            direction = touch_direction(game, mx, my, lay["top"])
+                            if direction and direction != game.direction:
+                                game.turn(direction)
+                                changed = True
+                elif key in (ord("p"), ord("P")):
                     paused = not paused
-                elif key in KEYS:
+                    changed = True
+                    if not paused:
+                        next_tick = time.monotonic() + game.tick_ms / 1000.0
+                elif key in KEYS and KEYS[key] != game.direction:
                     game.turn(KEYS[key])
+                    changed = True
 
             if small:
                 stdscr.erase()
                 safe_addstr(stdscr, 0, 0, "terminal too small")
-                safe_addstr(stdscr, 1, 0, f"need 30x12, have {cols}x{rows}")
+                safe_addstr(stdscr, 1, 0, f"need 20x6, have {cols}x{rows}")
                 safe_addstr(stdscr, 2, 0, "resize the window, or q to quit")
                 stdscr.refresh()
+                next_tick = time.monotonic() + game.tick_ms / 1000.0
                 continue
 
-            if not paused:
+            now = time.monotonic()
+            stepped = False
+            if not paused and now >= next_tick:
                 game.step()
-                stdscr.timeout(game.tick_ms)
-            draw(stdscr, game, paused, high_score, attrs)
+                next_tick = now + game.tick_ms / 1000.0
+                stepped = True
+
+            if stepped or changed:
+                draw(stdscr, game, paused, high_score, attrs)
 
         high_score = max(high_score, game.score)
         win = game.food is None
@@ -340,7 +409,7 @@ def play(stdscr):
             key = stdscr.getch()
             if key in (ord("q"), ord("Q")):
                 return
-            if key in (ord("r"), ord("R"), ord(" ")):
+            if key in (ord("r"), ord("R"), ord(" ")) or key == curses.KEY_MOUSE:
                 break
 
 
@@ -388,6 +457,16 @@ def selftest():
     assert layout(6, 20)["hud"] is False and layout(7, 20)["hud"] is True
     assert layout(9, 20)["hint"] is False and layout(10, 20)["hint"] is True
     assert too_small(5, 80) and too_small(24, 19) and not too_small(6, 20)
+
+    # touch/tap steering: dominant axis wins, and the border ring is a d-pad
+    g = Game(10, 20, random.Random(5))
+    hy, hx = g.body[0]
+    assert touch_direction(g, hx + 1 + 5, hy + 2, 2) == RIGHT
+    assert touch_direction(g, hx + 1 - 5, hy + 2, 2) == LEFT
+    assert touch_direction(g, hx + 1, hy + 2 + 4, 2) == DOWN
+    assert touch_direction(g, hx + 1, hy + 2 - 4, 2) == UP
+    assert touch_direction(g, hx + 1, hy + 2, 2) is None
+    assert touch_direction(g, 0, hy + 2, 2) == LEFT
 
     # shrinking mid-run keeps the snake inside and on-screen
     g = Game(20, 40, random.Random(4))
