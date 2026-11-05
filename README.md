@@ -39,7 +39,6 @@ Other controls
 Key| Action
 P| Pause / Resume
 Q| Quit the game
-R| Restart after losing
 
 🏁 When You Lose
 
@@ -52,7 +51,6 @@ The game ends when you hit a wall or your own body.
 
 - Python 3
 - A compatible terminal
-- Minimum terminal size: 20 × 6
 
 No Pygame, external game engine, or graphics assets required.
 
