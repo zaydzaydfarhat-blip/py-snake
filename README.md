@@ -1,6 +1,6 @@
 # py-snake
 
-A tiny terminal snake game. Python 3, standard library only — no install step.
+A tiny terminal snake game made using opencode. Python 3, standard library only - install step.
 
 ```bash
 python3 snake.py
@@ -15,3 +15,7 @@ There is also a headless check of the game logic:
 ```bash
 python3 snake.py --selftest
 ```
+
+to use it download python3. and if you are in the terminal type git clone zaydzaydfarhat-blip/py-snake and use cd py-snake to go to the dir and type python3 snake.py to play.
+
+hope you enjoy ☺️☺️
