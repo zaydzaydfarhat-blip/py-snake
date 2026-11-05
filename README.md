@@ -185,5 +185,5 @@ Made with ❤️, Python, and OpenCode.
 
 ⭐ Enjoying Py-Snake? Give the repository a star!
 
-🌈 Having issues report to the dev of the project
+🌈 Having issues. report to the Creator of the project
 </div>
